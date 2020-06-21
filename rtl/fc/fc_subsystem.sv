@@ -32,6 +32,10 @@ module fc_subsystem #(
     XBAR_TCDM_BUS.Master              l2_data_master,
     XBAR_TCDM_BUS.Master              l2_instr_master,
     XBAR_TCDM_BUS.Master              l2_hwpe_master [NB_HWPE_PORTS-1:0],
+`ifdef QUENTIN_SCM
+    UNICAD_MEM_BUS_32.Master          scm_l2_data_master,
+    UNICAD_MEM_BUS_32.Master          scm_l2_instr_master,
+`endif
     APB_BUS.Slave                     apb_slave_eu,
     APB_BUS.Slave                     apb_slave_hwpe,
 
@@ -58,7 +62,9 @@ module fc_subsystem #(
     logic [4:0]  core_irq_id    ;
     logic [4:0]  core_irq_ack_id;
     logic        core_irq_ack   ;
-    logic [31:0] core_irq_x;
+    logic [14:0] core_irq_fast  ;
+
+    logic [3:0]  irq_ack_id;
 
     // Boot address, core id, cluster id, fethc enable and core_status
     logic [31:0] boot_addr        ;
@@ -93,6 +99,50 @@ module fc_subsystem #(
     //********************************************************
     //************ CORE DEMUX (TCDM vs L2) *******************
     //********************************************************
+`ifdef QUENTIN_SCM
+    assign is_scm_instr_req = (core_instr_addr < `SOC_L2_PRI_CH0_SCM_END_ADDR) && (core_instr_addr >= `SOC_L2_PRI_CH0_SCM_START_ADDR) || (core_instr_addr < `ALIAS_SOC_L2_PRI_CH0_SCM_END_ADDR) && (core_instr_addr >= `ALIAS_SOC_L2_PRI_CH0_SCM_START_ADDR);
+
+    fc_demux fc_demux_instr_i (
+        .clk          ( clk_i               ),
+        .rst_n        ( rst_ni              ),
+        .port_sel_i   ( is_scm_instr_req    ),
+        .slave_port   ( core_instr_bus      ),
+        .master_port0 ( l2_instr_master     ),
+        .master_port1 ( scm_l2_instr_master )
+    );
+
+    assign core_instr_bus.req   = core_instr_req;
+    assign core_instr_bus.add   = core_instr_addr;
+    assign core_instr_bus.wen   = ~1'b0;
+    assign core_instr_bus.wdata = '0;
+    assign core_instr_bus.be    = 4'b1111;
+    assign core_instr_gnt       = core_instr_bus.gnt;
+    assign core_instr_rvalid    = core_instr_bus.r_valid;
+    assign core_instr_rdata     = core_instr_bus.r_rdata;
+    assign core_instr_err       = 1'b0;
+
+    assign is_scm_data_req = (core_data_addr < `SOC_L2_PRI_CH0_SCM_END_ADDR) && (core_data_addr >= `SOC_L2_PRI_CH0_SCM_START_ADDR) || (core_data_addr < `ALIAS_SOC_L2_PRI_CH0_SCM_END_ADDR) && (core_data_addr >= `ALIAS_SOC_L2_PRI_CH0_SCM_START_ADDR);
+
+    fc_demux fc_demux_data_i (
+        .clk          ( clk_i              ),
+        .rst_n        ( rst_ni             ),
+        .port_sel_i   ( is_scm_data_req    ),
+        .slave_port   ( core_data_bus      ),
+        .master_port0 ( l2_data_master     ),
+        .master_port1 ( scm_l2_data_master )
+    );
+
+    assign core_data_bus.req   = core_data_req;
+    assign core_data_bus.add   = core_data_addr;
+    assign core_data_bus.wen   = ~core_data_we;
+    assign core_data_bus.wdata = core_data_wdata;
+    assign core_data_bus.be    = core_data_be;
+    assign core_data_gnt       = core_data_bus.gnt;
+    assign core_data_rvalid    = core_data_bus.r_valid;
+    assign core_data_rdata     = core_data_bus.r_rdata;
+    assign core_data_err       = 1'b0;
+`else
+
     assign l2_data_master.req    = core_data_req;
     assign l2_data_master.add    = core_data_addr;
     assign l2_data_master.wen    = ~core_data_we;
@@ -113,6 +163,9 @@ module fc_subsystem #(
     assign core_instr_rvalid     = l2_instr_master.r_valid;
     assign core_instr_rdata      = l2_instr_master.r_rdata;
     assign core_instr_err        = l2_instr_master.r_opc;
+
+
+`endif
 
     //********************************************************
     //************ RISCV CORE ********************************
@@ -192,20 +245,13 @@ module fc_subsystem #(
 `else
     ibex_core #(
 `endif
-        .PMPEnable                ( 1'b0         ),
-        .MHPMCounterNum           ( 10           ),
-        .MHPMCounterWidth         ( 40           ),
-        .RV32E                    ( IBEX_RV32E   ),
-        .RV32M                    ( IBEX_RV32M   ),
-        .RV32B                    ( 1'b0         ),
-        .BranchTargetALU          ( 1'b0         ),
-        .WritebackStage           ( 1'b0         ),
-        .MultiplierImplementation ( "fast"       ),
-        .ICache                   ( 1'b0         ),
-        .DbgTriggerEn             ( 1'b1         ),
-        .SecureIbex               ( 1'b0         ),
-        .DmHaltAddr               ( 32'h1A110800 ),
-        .DmExceptionAddr          ( 32'h1A110808 )
+        .PMPEnable           ( 0            ),
+        .MHPMCounterNum      ( 8            ),
+        .MHPMCounterWidth    ( 40           ),
+        .RV32E               ( IBEX_RV32E   ),
+        .RV32M               ( IBEX_RV32M   ),
+        .DmHaltAddr          ( 32'h1A110800 ),
+        .DmExceptionAddr     ( 32'h1A110808 )
     ) lFC_CORE (
         .clk_i                 ( clk_i             ),
         .rst_ni                ( rst_ni            ),
@@ -237,12 +283,11 @@ module fc_subsystem #(
         .irq_software_i        ( 1'b0              ),
         .irq_timer_i           ( 1'b0              ),
         .irq_external_i        ( 1'b0              ),
-        .irq_fast_i            ( 15'b0             ),
+        .irq_fast_i            ( core_irq_fast     ),
         .irq_nm_i              ( 1'b0              ),
 
-        .irq_x_i               ( core_irq_x        ),
-        .irq_x_ack_o           ( core_irq_ack      ),
-        .irq_x_ack_id_o        ( core_irq_ack_id   ),
+        .irq_ack_o             ( core_irq_ack      ),
+        .irq_ack_id_o          ( irq_ack_id        ),
 
         .debug_req_i           ( debug_req_i       ),
 
@@ -256,12 +301,24 @@ module fc_subsystem #(
 
     generate
     if ( USE_IBEX == 1) begin : convert_irqs
-    // Ibex supports 32 additional fast interrupts and reads the interrupt lines directly.
+    // Ibex supports 15 fast interrupts and reads the interrupt lines directly
     // Convert ID back to interrupt lines
-    always_comb begin : gen_core_irq_x
-        core_irq_x = '0;
-        if (core_irq_req) begin
-            core_irq_x[core_irq_id] = 1'b1;
+    always_comb begin : gen_core_irq_fast
+        core_irq_fast = '0;
+        if (core_irq_req && (core_irq_id == 26)) begin
+            // remap SoC Event FIFO
+            core_irq_fast[10] = 1'b1;
+        end else if (core_irq_req && (core_irq_id < 15)) begin
+            core_irq_fast[core_irq_id] = 1'b1;
+        end
+    end
+
+    // remap ack ID for SoC Event FIFO
+    always_comb begin : gen_core_irq_ack_id
+        if (irq_ack_id == 10) begin
+            core_irq_ack_id = 26;
+        end else begin
+            core_irq_ack_id = {1'b0, irq_ack_id};
         end
     end
 
@@ -308,7 +365,7 @@ module fc_subsystem #(
         assign apb_slave_hwpe.prdata  = '0;
         assign apb_slave_hwpe.pready  = '0;
         assign apb_slave_hwpe.pslverr = '0;
-        for(genvar ii=0; ii<NB_HWPE_PORTS; ii++) begin : no_fc_hwpe_gen_loop
+        for(genvar ii=0; ii<NB_HWPE_PORTS; ii++) begin
             assign l2_hwpe_master[ii].req   = '0;
             assign l2_hwpe_master[ii].wen   = '0;
             assign l2_hwpe_master[ii].wdata = '0;
